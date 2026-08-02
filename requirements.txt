@@ -1,0 +1,13 @@
+# The versions this port was built and verified against, on macOS 14 / Apple M1
+# / Python 3.9. Anything newer in the same major line should be fine.
+mediapipe>=0.10          # 0.10.35
+opencv-python>=4.8       # 4.13.0 (opencv-contrib-python works too)
+moderngl>=5.8            # 5.12.0
+glfw>=2.6                # 2.10.2
+numpy>=1.24              # 2.0.2
+pillow>=9.5              # 11.3.0
+
+# Optional: offline speech. Without them the mock scorer runs, which is fully
+# playable. See README, "Speech".
+# vosk>=0.3.45
+# sounddevice>=0.4.6

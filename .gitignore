@@ -1,0 +1,16 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# 7.5 MB, fetched once by `python3 -m mantra_hands.vendor`. Not in the repo, and
+# never fetched at runtime — see README, "Quick start".
+mantra_hands/models/
+
+# Clips land next to whatever you launched from.
+mantra-hands-*.mp4
+mantra-hands-*.avi

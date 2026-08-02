@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mantra-hands"
+version = "1.0.0"
+description = "Push your palm at the camera and say the word. Elemental spellcasting for English learners."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+
+# One vision dependency, one GL binding, one window binding, and the two
+# libraries every Python image path already has. Nothing else: no game engine,
+# no UI toolkit, no scene graph. The scene is 2D billboards and a solver.
+dependencies = [
+  "mediapipe>=0.10",
+  "opencv-python>=4.8",
+  "moderngl>=5.8",
+  "glfw>=2.6",
+  "numpy>=1.24",
+  "pillow>=9.5",
+]
+
+[project.optional-dependencies]
+# Offline word recognition. Without these the app scores you with the mock,
+# which is fully playable — see README, "Speech".
+speech = ["vosk>=0.3.45", "sounddevice>=0.4.6"]
+
+[project.scripts]
+mantra-hands = "mantra_hands.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["mantra_hands*"]
+
+[tool.setuptools.package-data]
+mantra_hands = ["content/deck.json", "models/*.task"]
