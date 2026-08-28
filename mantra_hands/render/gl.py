@@ -18,6 +18,8 @@ import numpy as np
 
 from .shaders.common import VERSION
 
+_UNSET = object()
+
 
 @dataclass
 class GLCaps:
@@ -165,6 +167,10 @@ class Program:
         except Exception as err:  # noqa: BLE001
             raise WindowError(f"{label} failed to compile:\n{err}") from err
         self._locs: Dict[str, Optional[moderngl.Uniform]] = {}
+        # Uniform values belong to a program and persist across draws. Avoid
+        # repeating driver calls for the many dimensions, sampler slots and
+        # tuning constants that do not change from one frame to the next.
+        self._values: Dict[str, object] = {}
 
     def loc(self, name: str) -> Optional[moderngl.Uniform]:
         if name not in self._locs:
@@ -182,33 +188,27 @@ class Program:
         return self
 
     def int(self, name: str, v: int) -> "Program":
-        u = self.loc(name)
-        if u is not None:
-            u.value = int(v)
-        return self
+        return self._value(name, int(v))
 
     def float(self, name: str, v: float) -> "Program":
-        u = self.loc(name)
-        if u is not None:
-            u.value = float(v)
-        return self
+        return self._value(name, float(v))
 
     def vec2(self, name: str, x: float, y: float) -> "Program":
-        u = self.loc(name)
-        if u is not None:
-            u.value = (float(x), float(y))
-        return self
+        return self._value(name, (float(x), float(y)))
 
     def vec3(self, name: str, x: float, y: float, z: float) -> "Program":
-        u = self.loc(name)
-        if u is not None:
-            u.value = (float(x), float(y), float(z))
-        return self
+        return self._value(name, (float(x), float(y), float(z)))
 
     def vec4(self, name: str, x: float, y: float, z: float, w: float) -> "Program":
+        return self._value(name, (float(x), float(y), float(z), float(w)))
+
+    def _value(self, name: str, value: object) -> "Program":
+        if self._values.get(name, _UNSET) == value:
+            return self
         u = self.loc(name)
         if u is not None:
-            u.value = (float(x), float(y), float(z), float(w))
+            u.value = value
+        self._values[name] = value
         return self
 
     def floatv(self, name: str, v: np.ndarray) -> "Program":

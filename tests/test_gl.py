@@ -12,9 +12,18 @@ from mantra_hands.render.gl import Program
 class RecordingUniform:
     def __init__(self) -> None:
         self.payloads = []
+        self.values = []
 
     def write(self, payload) -> None:  # noqa: ANN001
         self.payloads.append(payload)
+
+    @property
+    def value(self):  # noqa: ANN201
+        return self.values[-1] if self.values else None
+
+    @value.setter
+    def value(self, value) -> None:  # noqa: ANN001
+        self.values.append(value)
 
 
 class UniformUploadTests(unittest.TestCase):
@@ -22,6 +31,7 @@ class UniformUploadTests(unittest.TestCase):
         uniform = RecordingUniform()
         program = Program.__new__(Program)
         program._locs = {"u": uniform}
+        program._values = {}
 
         values = (
             np.arange(2, dtype=np.float32),
@@ -37,6 +47,18 @@ class UniformUploadTests(unittest.TestCase):
         self.assertEqual(len(uniform.payloads), len(values))
         for payload, expected in zip(uniform.payloads, values):
             self.assertIs(payload, expected)
+
+    def test_unchanged_scalar_uniform_does_not_reenter_driver(self) -> None:
+        uniform = RecordingUniform()
+        program = Program.__new__(Program)
+        program._locs = {"u": uniform}
+        program._values = {}
+
+        program.float("u", 1.5)
+        program.float("u", 1.5)
+        program.float("u", 2.0)
+
+        self.assertEqual(uniform.values, [1.5, 2.0])
 
 
 if __name__ == "__main__":
