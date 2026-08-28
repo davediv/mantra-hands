@@ -605,6 +605,11 @@ class Renderer:
             self._u_rune_fail[i] = 0.0
 
     def _simulate(self, dt_sec: float) -> None:
+        # A new charge/burst changes its spawn id, so waking from an idle state
+        # reseeds every particle correctly. Until then, advancing two 128x128
+        # float targets produces no pixels and is pure GPU/driver overhead.
+        if not self._particles_active():
+            return
         ctx = self.ctx
         src = self._ping_pong
         dst = src ^ 1
@@ -705,12 +710,12 @@ class Renderer:
         self.draw_calls += 1
 
     def _draw_particles(self) -> None:
-        bursting = self._u_mode[0] == MODE_BURST or self._u_mode[1] == MODE_BURST
         # Nothing charging and nothing burning: skip the draw entirely rather
         # than pay 16,384 instances to render nothing.
-        if not bursting and self._u_rune_alpha[0] < 0.004 and self._u_rune_alpha[1] < 0.004:
+        if not self._particles_active():
             self.particles_drawn = 0
             return
+        bursting = self._u_mode[0] == MODE_BURST or self._u_mode[1] == MODE_BURST
         full = self.max_particles >> 1 if self.low_power else self.max_particles
         charge = 1400 if self.low_power else 2800
         count = (full // 6 if self.failing else full) if bursting else charge
@@ -737,6 +742,14 @@ class Renderer:
         )
         self._vao_particles.render(moderngl.TRIANGLE_STRIP, vertices=4, instances=count)
         self.draw_calls += 1
+
+    def _particles_active(self) -> bool:
+        return bool(
+            self._u_mode[0] == MODE_BURST
+            or self._u_mode[1] == MODE_BURST
+            or self._u_rune_alpha[0] >= 0.004
+            or self._u_rune_alpha[1] >= 0.004
+        )
 
     def _draw_word(self) -> None:
         if self.word_alpha < 0.004:
