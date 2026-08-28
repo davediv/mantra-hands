@@ -16,7 +16,8 @@ rather than a width.
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional, Tuple
+import math
+from typing import Callable, Dict, List, Optional, Tuple
 
 import moderngl
 import numpy as np
@@ -56,6 +57,12 @@ KEY_HELP = (
     ("q", "quit"),
 )
 
+GESTURE_HINTS = (
+    "Open palm · say the word · push",
+    "Hold it — say the word out loud",
+    "PUSH!",
+)
+
 
 def _rgb(hex_color: str) -> Tuple[int, int, int]:
     h = hex_color.lstrip("#")
@@ -87,6 +94,11 @@ class Shell:
         self._image: Optional[Image.Image] = None
         self._texture: Optional[moderngl.Texture] = None
         self._dirty = True
+        # The gesture hint changes at the latency-sensitive charge/armed
+        # transitions. It occupies a thin strip, so patch that strip instead of
+        # rebuilding and uploading the full-window overlay.
+        self._hint_dirty = False
+        self._hint_cache: Dict[str, bytes] = {}
 
         # Everything the overlay shows. Any assignment that changes one of these
         # sets _dirty; nothing else causes a re-rasterise.
@@ -132,6 +144,9 @@ class Shell:
         self._texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
         self._texture.repeat_x = False
         self._texture.repeat_y = False
+        self._hint_cache.clear()
+        if self._word is not None:
+            self._prewarm_hints()
         self._dirty = True
 
     @property
@@ -212,13 +227,14 @@ class Shell:
     def set_word(self, entry: WordEntry) -> None:
         self._word = entry
         self._fizzled = False
+        self._prewarm_hints()
         self._dirty = True
 
     def set_hint(self, text: str) -> None:
         if text == self._hint:
             return
         self._hint = text
-        self._dirty = True
+        self._hint_dirty = True
 
     def set_charge(self, charge01: float, armed: bool) -> None:
         """Called every frame. Two quads — never a re-rasterise."""
@@ -281,6 +297,16 @@ class Shell:
             self._rasterise()
             self._texture.write(self._image.tobytes())
             self._dirty = False
+            self._hint_dirty = False
+        elif self._hint_dirty:
+            # A full-screen sheet is already baked into the overlay texture. Do
+            # not patch through it; closing the sheet forces a full refresh that
+            # includes the latest hint.
+            if self._word is None:
+                self._hint_dirty = False
+            elif not self._prompt_covered:
+                self._patch_hint()
+                self._hint_dirty = False
 
         calls = 0
         self._prog.use().tex("uLayer", 0, self._texture)
@@ -290,15 +316,18 @@ class Shell:
         # The bar is drawn after the texture, so anything that dims the screen
         # has to suppress it explicitly — a full-screen sheet with a charge bar
         # glowing through it reads as a rendering bug.
-        covered = (
+        if self._word is not None and not self._prompt_covered:
+            calls += self._draw_charge()
+        return calls
+
+    @property
+    def _prompt_covered(self) -> bool:
+        return (
             self._loading is not None
             or self._explainer is not None
             or self._fatal is not None
             or self._settings_open
         )
-        if self._word is not None and not covered:
-            calls += self._draw_charge()
-        return calls
 
     def _draw_charge(self) -> int:
         # Screen fractions, matching where _rasterise draws the track.
@@ -346,6 +375,51 @@ class Shell:
             self._draw_sheet(d, s, "", self._loading)
         if self._fatal is not None:
             self._draw_sheet(d, s, "Stuck", self._fatal)
+
+    def _hint_box(self) -> Tuple[int, int, int, int]:
+        """Pixel bounds of the dynamic prompt hint, with room for antialiasing."""
+        s = self._scale
+        baseline = self._h - 46.0 * s
+        font_size = max(10, int(13 * s))
+        top = max(0, int(math.floor(baseline - 2.0 * s)))
+        bottom = min(self._h, int(math.ceil(baseline + font_size + 7.0 * s)))
+        return 0, top, self._w, max(top + 1, bottom)
+
+    def _patch_hint(self) -> None:
+        """Redraws and uploads only the strip occupied by the gesture hint."""
+        box = self._hint_box()
+        data = self._hint_cache.get(self._hint)
+        if data is None:
+            data = self._render_hint_patch(self._hint, box)
+            self._hint_cache[self._hint] = data
+        self._texture.write(
+            data,
+            viewport=(box[0], box[1], box[2] - box[0], box[3] - box[1]),
+        )
+
+    def _prewarm_hints(self) -> None:
+        """Rasterises the three fixed hints before gesture interaction begins."""
+        if self._image is None:
+            return
+        box = self._hint_box()
+        for hint in GESTURE_HINTS:
+            if hint not in self._hint_cache:
+                self._hint_cache[hint] = self._render_hint_patch(hint, box)
+
+    def _render_hint_patch(self, hint: str, box: Tuple[int, int, int, int]) -> bytes:
+        width = box[2] - box[0]
+        height = box[3] - box[1]
+        patch = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        d = ImageDraw.Draw(patch)
+        s = self._scale
+        d.text(
+            (width * 0.5, self._h - 46 * s - box[1]),
+            hint,
+            font=fonts.load("ui-bold", max(10, int(13 * s))),
+            fill=TEXT + (170,),
+            anchor="ma",
+        )
+        return patch.tobytes()
 
     def _draw_topbar(self, d: ImageDraw.ImageDraw, s: float) -> None:
         label_font = fonts.load("ui", max(9, int(11 * s)))
@@ -445,8 +519,11 @@ class Shell:
                 fill=TEXT + (140,),
                 anchor="ma",
             )
+        self._draw_hint(d, s)
+
+    def _draw_hint(self, d: ImageDraw.ImageDraw, s: float) -> None:
         d.text(
-            (cx, top + 130 * s),
+            (self._w * 0.5, self._h - 46 * s),
             self._hint,
             font=fonts.load("ui-bold", max(10, int(13 * s))),
             fill=TEXT + (170,),
