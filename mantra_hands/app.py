@@ -380,6 +380,9 @@ class App:
         """
         self.word = self.deck.next()
         self.shell.set_word(self.word)
+        # Upload into the inactive word texture now, while the previous burst is
+        # still finishing. If the user charges early, switching is pointer-only.
+        self.renderer.word_tex.prepare(self.word.word)
         self.pending_word = self.word
         self.next_word_at = -1.0
         self.try_swap_element()
@@ -400,7 +403,7 @@ class App:
                 if 0 <= slot.burst_age < FX.burst_life * 1.1:
                     return
         self.renderer.element = pending.element
-        self.renderer.word_tex.set(pending.word)
+        self.renderer.word_tex.activate(pending.word)
         self.renderer.failing = False
         self.pending_word = None
 

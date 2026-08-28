@@ -1,9 +1,10 @@
 """
-Rasterises the target word to a texture.
+Rasterises the target word into a double-buffered texture.
 
-This runs when the word changes — once every few seconds at most, never inside
-the frame loop. By the time a cast fires, the texture is already resident and the
-burst uploads nothing.
+The next prompt is uploaded to the inactive texture as soon as it is known. The
+renderer can keep the prior word under its dissolving burst, then activate the
+new one with a pointer/index swap. An early charge therefore never pays text
+rasterisation, upload, or mipmap generation on its latency-sensitive frame.
 """
 
 from __future__ import annotations
@@ -23,18 +24,30 @@ class WordTexture:
         #: Width/height of the drawn glyphs, for sizing the quad.
         self.aspect = 4.0
         self.word = ""
+        self._active = 0
+        self._prepared_index = -1
+        self._prepared_word = ""
+        self._prepared_aspect = 4.0
 
         self._image = Image.new("RGBA", (TEX_W, TEX_H), (0, 0, 0, 0))
-        self.texture = ctx.texture((TEX_W, TEX_H), 4, dtype="f1")
-        self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
-        self.texture.repeat_x = False
-        self.texture.repeat_y = False
+        self._textures = [
+            ctx.texture((TEX_W, TEX_H), 4, dtype="f1"),
+            ctx.texture((TEX_W, TEX_H), 4, dtype="f1"),
+        ]
+        for texture in self._textures:
+            texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+            texture.repeat_x = False
+            texture.repeat_y = False
         self.set("READY")
 
-    def set(self, word: str) -> None:
-        if word == self.word:
+    @property
+    def texture(self) -> moderngl.Texture:
+        return self._textures[self._active]
+
+    def prepare(self, word: str) -> None:
+        """Rasterises and uploads into the texture that is not currently visible."""
+        if word == self.word or word == self._prepared_word:
             return
-        self.word = word
 
         text = word.upper()
         self._image.paste((0, 0, 0, 0), (0, 0, TEX_W, TEX_H))
@@ -59,9 +72,31 @@ class WordTexture:
             anchor="mm",
         )
 
-        self.aspect = drawn_width / max(1.0, size * 0.78)
+        aspect = drawn_width / max(1.0, size * 0.78)
 
         # Row 0 of the image lands at v=0, which is what WORD_VS assumes when it
         # flips vUv.y — the same convention the browser build's canvas upload had.
-        self.texture.write(self._image.tobytes())
-        self.texture.build_mipmaps()
+        index = self._active ^ 1
+        texture = self._textures[index]
+        texture.write(self._image.tobytes())
+        texture.build_mipmaps()
+        self._prepared_index = index
+        self._prepared_word = word
+        self._prepared_aspect = aspect
+
+    def activate(self, word: str) -> None:
+        """Makes a prepared word visible without rasterisation or an upload."""
+        if word == self.word:
+            return
+        if word != self._prepared_word:
+            self.prepare(word)
+        self._active = self._prepared_index
+        self.word = self._prepared_word
+        self.aspect = self._prepared_aspect
+        self._prepared_index = -1
+        self._prepared_word = ""
+
+    def set(self, word: str) -> None:
+        """Immediate compatibility path; interaction code uses prepare/activate."""
+        self.prepare(word)
+        self.activate(word)
