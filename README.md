@@ -191,9 +191,10 @@ Every vector, matrix and buffer is allocated at init:
 - The per-hand uniform payloads are preallocated arrays, refilled in place each frame.
 - Lightning is built into an `array('f')` — Python's `Float32Array` in everything but name — and
   uploaded through a memoryview, so a regeneration copies nothing.
-- The 2D chrome is rasterised only when something it shows changes. The charge bar, which changes
-  every frame while a hand is charging, is not in that image at all: it is two solid quads whose
-  geometry is a uniform.
+- The 2D chrome patches only the component region that changed, and its quad is scissored to rows
+  containing visible pixels instead of shading transparent gaps across a high-DPI display. The
+  charge bar, which changes every frame while a hand is charging, is not in that image at all: it
+  is two solid quads whose geometry is a uniform.
 
 A GC pause is a dropped frame, and dropped frames are visible in a 60 fps recording.
 
@@ -225,8 +226,8 @@ rather than one burst drawn twice.
 5  particles           10  composite to the screen
 ```
 
-Two more put the chrome on top, and one more while a clip is recording. The HUD counts all of
-them.
+A few small scissored draws put the occupied chrome bands on top, and one more pass is used while
+a clip is recording. The HUD counts all of them.
 
 Bloom is one pass on a quarter-resolution chain, not an effect-composer stack. It is what makes
 this read as magic instead of as a school project, so it stays — it is just kept cheap. Screen

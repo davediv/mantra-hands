@@ -18,7 +18,7 @@ Nothing in frame() allocates. Every buffer, texture and array below is built
 during init.
 
 The 2D chrome the browser build kept in the DOM is drawn by ui/shell.py after
-this, as one textured quad plus the charge bar — see there for why.
+this, as scissored bands from one texture plus the charge bar — see there for why.
 """
 
 from __future__ import annotations

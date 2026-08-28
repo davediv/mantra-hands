@@ -3,10 +3,11 @@ Every piece of chrome the app draws, behind one object.
 
 The browser build put all of this in the DOM and let the compositor deal with it.
 There is no DOM here, so it is rasterised with PIL into one RGBA texture and
-drawn as a single quad after the composite pass — and, critically, only
-re-rasterised when something it shows actually changes. A word lasts seconds; a
-toast lasts three; the counters change once a cast. Rasterising a full-window
-image every frame would cost more than the entire scene does.
+drawn after the composite pass. The quad is scissored to occupied row bands, so
+transparent gaps never shade the whole display. Frequently changing components
+patch only their own texture region; full-window rasterisation is reserved for
+full-screen sheets and resize. A full upload on every frame would cost more than
+the entire scene does.
 
 The one thing that does change every frame is the charge bar, and that is why it
 is *not* in the texture: it is two solid quads whose geometry is a uniform, which
@@ -97,14 +98,18 @@ class Shell:
         self._texture: Optional[moderngl.Texture] = None
         self._dirty = True
         self._draw_regions: List[Tuple[int, int]] = [(0, 1)]
+        self._topbar_dirty = False
+        self._center_dirty = False
+        self._heard_dirty = False
+        self._prompt_dirty = False
         # The gesture hint changes at the latency-sensitive charge/armed
         # transitions. It occupies a thin strip, so patch that strip instead of
         # rebuilding and uploading the full-window overlay.
         self._hint_dirty = False
         self._hint_cache: Dict[str, bytes] = {}
 
-        # Everything the overlay shows. Any assignment that changes one of these
-        # sets _dirty; nothing else causes a re-rasterise.
+        # Everything the overlay shows. Changes request either a component patch
+        # or, for full-screen sheets, a complete rerasterisation.
         self._word: Optional[WordEntry] = None
         self._hint = "Open palm · say the word · push"
         self._combo = 0
@@ -220,12 +225,12 @@ class Shell:
     def set_recording(self, on: bool) -> None:
         if on != self._recording:
             self._recording = on
-            self._dirty = True
+            self._topbar_dirty = True
 
     def set_countdown(self, text: Optional[str]) -> None:
         if text != self._countdown:
             self._countdown = text
-            self._dirty = True
+            self._center_dirty = True
 
     # --------------------------------------------------------------- prompt ---
 
@@ -233,7 +238,7 @@ class Shell:
         self._word = entry
         self._fizzled = False
         self._prewarm_hints()
-        self._dirty = True
+        self._prompt_dirty = True
 
     def set_hint(self, text: str) -> None:
         if text == self._hint:
@@ -250,13 +255,13 @@ class Shell:
         if show == self._empty:
             return
         self._empty = show
-        self._dirty = True
+        self._center_dirty = True
 
     def set_counts(self, combo: int, streak: int, best: int) -> None:
         if (combo, streak, best) == (self._combo, self._streak, self._best):
             return
         self._combo, self._streak, self._best = combo, streak, best
-        self._dirty = True
+        self._topbar_dirty = True
 
     def show_heard(self, text: str, correct: bool, now_ms: float) -> None:
         if not text:
@@ -264,17 +269,17 @@ class Shell:
         self._heard = text
         self._heard_ok = correct
         self._heard_until = now_ms + 1800.0
-        self._dirty = True
+        self._heard_dirty = True
 
     def clear_heard(self) -> None:
         if self._heard:
             self._heard = ""
-            self._dirty = True
+            self._heard_dirty = True
 
     def fizzle(self) -> str:
         """The word stays on screen for a retry; only the styling says it missed."""
         self._fizzled = True
-        self._dirty = True
+        self._prompt_dirty = True
         line = FIZZLE_LINES[self._fizzle_index % len(FIZZLE_LINES)]
         self._fizzle_index += 1
         return line
@@ -283,7 +288,7 @@ class Shell:
         self._toast = text
         self._toast_warn = warn
         self._toast_until = now_ms + 3200.0
-        self._dirty = True
+        self._prompt_dirty = True
 
     # ----------------------------------------------------------------- draw ---
 
@@ -293,25 +298,43 @@ class Shell:
         """
         if self._toast and now_ms > self._toast_until:
             self._toast = ""
-            self._dirty = True
+            self._prompt_dirty = True
         if self._heard and now_ms > self._heard_until:
             self._heard = ""
-            self._dirty = True
+            self._heard_dirty = True
 
         if self._dirty:
             self._rasterise()
             self._texture.write(self._image.tobytes())
             self._dirty = False
             self._hint_dirty = False
-        elif self._hint_dirty:
+            self._topbar_dirty = False
+            self._center_dirty = False
+            self._heard_dirty = False
+            self._prompt_dirty = False
+        elif not self._prompt_covered:
             # A full-screen sheet is already baked into the overlay texture. Do
             # not patch through it; closing the sheet forces a full refresh that
-            # includes the latest hint.
-            if self._word is None:
+            # includes the latest component state.
+            if self._topbar_dirty:
+                self._patch_topbar()
+                self._topbar_dirty = False
+            if self._center_dirty:
+                self._patch_center()
+                self._center_dirty = False
+            if self._heard_dirty:
+                self._patch_heard()
+                self._heard_dirty = False
+            if self._prompt_dirty:
+                self._patch_prompt()
+                self._prompt_dirty = False
                 self._hint_dirty = False
-            elif not self._prompt_covered:
-                self._patch_hint()
-                self._hint_dirty = False
+            elif self._hint_dirty:
+                if self._word is None:
+                    self._hint_dirty = False
+                else:
+                    self._patch_hint()
+                    self._hint_dirty = False
 
         calls = 0
         self._prog.use().tex("uLayer", 0, self._texture)
@@ -425,6 +448,82 @@ class Shell:
         top = max(0, int(math.floor(baseline - 2.0 * s)))
         bottom = min(self._h, int(math.ceil(baseline + font_size + 7.0 * s)))
         return 0, top, self._w, max(top + 1, bottom)
+
+    def _topbar_box(self) -> Tuple[int, int, int, int]:
+        return 0, 0, self._w, min(self._h, max(1, int(math.ceil(72 * self._scale))))
+
+    def _prompt_box(self) -> Tuple[int, int, int, int]:
+        top = max(0, int(math.floor(self._h - 184 * self._scale)))
+        return 0, top, self._w, self._h
+
+    def _center_box(self) -> Tuple[int, int, int, int]:
+        return 0, int(self._h * 0.25), self._w, int(math.ceil(self._h * 0.62))
+
+    def _heard_box(self) -> Tuple[int, int, int, int]:
+        return 0, int(self._h * 0.65), self._w, int(math.ceil(self._h * 0.74))
+
+    def _patch_topbar(self) -> None:
+        box = self._topbar_box()
+        self._image.paste((0, 0, 0, 0), box)
+        self._draw_topbar(ImageDraw.Draw(self._image), self._scale)
+        self._upload_box(box)
+        self._refresh_component_regions()
+
+    def _patch_prompt(self) -> None:
+        box = self._prompt_box()
+        self._image.paste((0, 0, 0, 0), box)
+        d = ImageDraw.Draw(self._image)
+        if self._word is not None:
+            self._draw_prompt(d, self._scale)
+        if self._toast:
+            self._draw_toast(d, self._scale)
+        self._upload_box(box)
+        self._refresh_component_regions()
+
+    def _patch_center(self) -> None:
+        box = self._center_box()
+        self._image.paste((0, 0, 0, 0), box)
+        d = ImageDraw.Draw(self._image)
+        if self._empty:
+            self._draw_empty_state(d, self._scale)
+        if self._countdown:
+            self._draw_countdown(d, self._scale)
+        self._upload_box(box)
+        self._refresh_component_regions()
+
+    def _patch_heard(self) -> None:
+        box = self._heard_box()
+        self._image.paste((0, 0, 0, 0), box)
+        if self._heard:
+            self._draw_heard(ImageDraw.Draw(self._image), self._scale)
+        self._upload_box(box)
+        self._refresh_component_regions()
+
+    def _upload_box(self, box: Tuple[int, int, int, int]) -> None:
+        region = self._image.crop(box)
+        self._texture.write(
+            region.tobytes(),
+            viewport=(box[0], box[1], box[2] - box[0], box[3] - box[1]),
+        )
+
+    def _refresh_component_regions(self) -> None:
+        """Keeps partial-update scissor bands in sync as components appear or leave."""
+        topbar = self._topbar_box()
+        regions = [(topbar[1], topbar[3])]
+        if self._empty or self._countdown:
+            regions.append((self._center_box()[1], self._center_box()[3]))
+        if self._heard:
+            regions.append((self._heard_box()[1], self._heard_box()[3]))
+        if self._word is not None or self._toast:
+            regions.append((self._prompt_box()[1], self._prompt_box()[3]))
+        regions.sort()
+        merged: List[Tuple[int, int]] = []
+        for start, end in regions:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        self._draw_regions = merged
 
     def _patch_hint(self) -> None:
         """Redraws and uploads only the strip occupied by the gesture hint."""
