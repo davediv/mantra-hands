@@ -135,19 +135,31 @@ class DemoCamera:
         self._next = time.perf_counter()
         self._frame = np.empty((height, width, 3), dtype=np.uint8)
 
-        # The diagonal ramp the gradient runs along, built once. Painting a frame
-        # is then three multiply-adds over it rather than a per-pixel loop.
+        # Each pixel's diagonal-gradient coordinate is static. Store it as a
+        # three-channel 16-bit lookup index; each frame only updates a tiny colour
+        # table and lets OpenCV expand it directly into the reusable output.
         ys = np.linspace(0.0, 1.0, height, dtype=np.float32)[:, None]
         xs = np.linspace(0.0, 1.0, width, dtype=np.float32)[None, :]
-        self._ramp = ((xs + ys) * 0.5)[:, :, None]
-        self._grid = self._build_grid(width, height)
+        ramp_index = np.rint((xs + ys) * 0.5 * 65535.0).astype(np.uint16)
+        self._ramp_index = np.repeat(ramp_index[:, :, None], 3, axis=2)
+
+        levels = np.linspace(0.0, 1.0, 65536, dtype=np.float32)[:, None, None]
+        lower = np.clip(levels * 2.0, 0.0, 1.0)
+        upper = np.clip(levels * 2.0 - 1.0, 0.0, 1.0)
+        c0 = np.array((0x2E, 0x1C, 0x14), dtype=np.float32) / 255.0
+        c2 = np.array((0x1A, 0x0F, 0x0B), dtype=np.float32) / 255.0
+        self._lut_weight = (lower - upper) * 255.0
+        self._lut_base = (c0 * (1.0 - lower) + c2 * upper) * 255.0
+        self._lut_work = np.empty((65536, 1, 3), dtype=np.float32)
+        self._lut = np.empty((65536, 1, 3), dtype=np.uint8)
+        self._grid_mask = self._build_grid_mask(width, height)
 
     @staticmethod
-    def _build_grid(width: int, height: int) -> np.ndarray:
-        grid = np.zeros((height, width, 1), dtype=np.float32)
-        grid[:, ::40] = 0.10
-        grid[::40, :] = 0.10
-        return grid
+    def _build_grid_mask(width: int, height: int) -> np.ndarray:
+        mask = np.zeros((height, width), dtype=np.uint8)
+        mask[:, ::40] = 255
+        mask[::40, :] = 255
+        return mask
 
     def read(self) -> Optional[np.ndarray]:
         # Pace to the frame rate. A real camera makes the detection thread wait
@@ -160,17 +172,11 @@ class DemoCamera:
         t = now_ms() / 1000.0
         mid = colorsys.hls_to_rgb(((t * 12.0) % 360.0) / 360.0, 0.22, 0.30)
         # BGR, because that is what the rest of the pipeline expects from cv2.
-        c0 = np.array((0x2E, 0x1C, 0x14), dtype=np.float32) / 255.0
-        c1 = np.array((mid[2], mid[1], mid[0]), dtype=np.float32)
-        c2 = np.array((0x1A, 0x0F, 0x0B), dtype=np.float32) / 255.0
-
-        r = self._ramp
-        lower = np.clip(r * 2.0, 0.0, 1.0)
-        upper = np.clip(r * 2.0 - 1.0, 0.0, 1.0)
-        img = c0 + (c1 - c0) * lower + (c2 - c1) * upper
-        img += self._grid * 0.95  # the graticule, so motion is obvious
-        np.multiply(np.clip(img, 0.0, 1.0), 255.0, out=img)
-        self._frame[:] = img.astype(np.uint8)
+        np.multiply(self._lut_weight, (mid[2], mid[1], mid[0]), out=self._lut_work)
+        np.add(self._lut_base, self._lut_work, out=self._lut_work)
+        np.copyto(self._lut, self._lut_work, casting="unsafe")
+        cv2.LUT(self._ramp_index, self._lut, dst=self._frame)
+        cv2.add(self._frame, (24, 24, 24), dst=self._frame, mask=self._grid_mask)
 
         cv2.rectangle(self._frame, (16, 16), (72, 72), (0x8C, 0xD6, 0x3F), -1)
         cv2.putText(
