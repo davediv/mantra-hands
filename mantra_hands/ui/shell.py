@@ -91,9 +91,12 @@ class Shell:
 
         self._w = 1
         self._h = 1
+        self._screen_w = 1
+        self._screen_h = 1
         self._image: Optional[Image.Image] = None
         self._texture: Optional[moderngl.Texture] = None
         self._dirty = True
+        self._draw_regions: List[Tuple[int, int]] = [(0, 1)]
         # The gesture hint changes at the latency-sensitive charge/armed
         # transitions. It occupies a thin strip, so patch that strip instead of
         # rebuilding and uploading the full-window overlay.
@@ -132,6 +135,8 @@ class Shell:
     # ----------------------------------------------------------------- size ---
 
     def resize(self, width: int, height: int) -> None:
+        self._screen_w = max(1, width)
+        self._screen_h = max(1, height)
         w = min(MAX_OVERLAY_W, max(1, width))
         h = max(1, round(height * w / max(1, width)))
         if w == self._w and h == self._h:
@@ -310,14 +315,29 @@ class Shell:
 
         calls = 0
         self._prog.use().tex("uLayer", 0, self._texture)
-        self._vao.render(moderngl.TRIANGLE_STRIP, vertices=4)
-        calls += 1
+        calls += self._draw_overlay_regions()
 
         # The bar is drawn after the texture, so anything that dims the screen
         # has to suppress it explicitly — a full-screen sheet with a charge bar
         # glowing through it reads as a rendering bug.
         if self._word is not None and not self._prompt_covered:
             calls += self._draw_charge()
+        return calls
+
+    def _draw_overlay_regions(self) -> int:
+        """Shades only row bands that contain nontransparent overlay pixels."""
+        sw, sh = self._screen_w, self._screen_h
+        previous_scissor = self.ctx.scissor
+        calls = 0
+        for top, bottom in self._draw_regions:
+            # PIL rows run top-down; OpenGL's scissor origin is bottom-left. One
+            # output-pixel pad preserves the edge texels under linear scaling.
+            screen_top = max(0, int(math.floor(top * sh / self._h)) - 1)
+            screen_bottom = min(sh, int(math.ceil(bottom * sh / self._h)) + 1)
+            self.ctx.scissor = (0, sh - screen_bottom, sw, screen_bottom - screen_top)
+            self._vao.render(moderngl.TRIANGLE_STRIP, vertices=4)
+            calls += 1
+        self.ctx.scissor = previous_scissor
         return calls
 
     @property
@@ -375,6 +395,27 @@ class Shell:
             self._draw_sheet(d, s, "", self._loading)
         if self._fatal is not None:
             self._draw_sheet(d, s, "Stuck", self._fatal)
+        self._update_draw_regions()
+
+    def _update_draw_regions(self) -> None:
+        """Groups occupied texture rows, merging small gaps to limit draw calls."""
+        occupied = self._image.getchannel("A").getprojection()[1]
+        merge_gap = max(2, round(36 * self._scale))
+        regions: List[Tuple[int, int]] = []
+        start = -1
+        last = -1
+        for row, alpha in enumerate(occupied):
+            if not alpha:
+                continue
+            if start < 0:
+                start = row
+            elif row - last > merge_gap:
+                regions.append((start, last + 1))
+                start = row
+            last = row
+        if start >= 0:
+            regions.append((start, last + 1))
+        self._draw_regions = regions or [(0, 1)]
 
     def _hint_box(self) -> Tuple[int, int, int, int]:
         """Pixel bounds of the dynamic prompt hint, with room for antialiasing."""
