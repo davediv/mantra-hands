@@ -6,6 +6,8 @@ no second render pass, no readback, no extra copy per frame. Outside a browser
 there is no such stream, so this reads the composited frame back from the
 export-resolution target and feeds it to an encoder. That readback is the one
 real cost the port adds, and it only runs while a clip is actually recording.
+Pixel-buffer readback is pipelined and conversion/encoding runs on a bounded
+worker queue, so neither stage stalls ordinary render frames.
 
 Everything else survives: before the countdown the render target switches to a
 true 1080x1920 and the window letterboxes, so the framing during the countdown is
@@ -150,6 +152,12 @@ class Recorder:
         self._last_write = 0.0
         self._frames = 0
         self._dropped_frames = 0
+        # Queue the countdown's final composited frame now. The first recording
+        # tick can then read it from the previous PBO while the GPU fills the
+        # next one, avoiding a synchronous glReadPixels stall.
+        prime_readback = getattr(renderer, "prime_present_readback", None)
+        if prime_readback is not None:
+            prime_readback()
         self._start_encoder(width, height)
         self.state = "recording"
 

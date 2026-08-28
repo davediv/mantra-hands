@@ -163,6 +163,9 @@ class Renderer:
         self.bloom_fbo: List[moderngl.Framebuffer] = []
         self._present_tex: Optional[moderngl.Texture] = None
         self._present_fbo: Optional[moderngl.Framebuffer] = None
+        self._readback_buffers: List[moderngl.Buffer] = []
+        self._readback_index = 0
+        self._readback_ready = False
         self.buffer_w = 1
         self.buffer_h = 1
         self.bloom_w = 1
@@ -290,17 +293,16 @@ class Renderer:
         self.bloom_w = max(1, w // div)
         self.bloom_h = max(1, h // div)
 
-        for resource in [self.scene_tex, self.scene_fbo, self._present_tex, self._present_fbo]:
+        for resource in [self.scene_tex, self.scene_fbo]:
             if resource is not None:
                 resource.release()
+        self._release_capture_targets()
         for t in self.bloom_tex:
             t.release()
         for f in self.bloom_fbo:
             f.release()
         self.bloom_tex = []
         self.bloom_fbo = []
-        self._present_tex = None
-        self._present_fbo = None
 
         # Half float for the scene: the burst core runs well over 1.0 and 8-bit
         # would clip it flat before bloom ever sees it.
@@ -313,6 +315,9 @@ class Renderer:
             )
             self.bloom_tex.append(tex)
             self.bloom_fbo.append(create_framebuffer(self.ctx, [tex]))
+
+        if self.capture:
+            self._allocate_capture_targets()
 
     def set_screen_rect(self, x: int, y: int, w: int, h: int) -> None:
         """
@@ -329,24 +334,73 @@ class Renderer:
     def set_capture(self, on: bool) -> None:
         """Routes the composite through an offscreen target so it can be read back."""
         self.capture = on
-        if on and self._present_fbo is None:
-            self._present_tex = create_texture(
-                self.ctx, self.buffer_w, self.buffer_h, 4, "f1", None, moderngl.LINEAR
-            )
-            self._present_fbo = create_framebuffer(self.ctx, [self._present_tex])
+        if on:
+            if self._present_fbo is None:
+                self._allocate_capture_targets()
+        else:
+            self._release_capture_targets()
+
+    def _allocate_capture_targets(self) -> None:
+        self._present_tex = create_texture(
+            self.ctx, self.buffer_w, self.buffer_h, 4, "f1", None, moderngl.LINEAR
+        )
+        self._present_fbo = create_framebuffer(self.ctx, [self._present_tex])
+        size = self.buffer_w * self.buffer_h * 3
+        self._readback_buffers = [
+            self.ctx.buffer(reserve=size),
+            self.ctx.buffer(reserve=size),
+        ]
+        self._readback_index = 0
+        self._readback_ready = False
+
+    def _release_capture_targets(self) -> None:
+        for buffer in self._readback_buffers:
+            buffer.release()
+        self._readback_buffers = []
+        self._readback_index = 0
+        self._readback_ready = False
+        if self._present_fbo is not None:
+            self._present_fbo.release()
+            self._present_fbo = None
+        if self._present_tex is not None:
+            self._present_tex.release()
+            self._present_tex = None
+
+    def prime_present_readback(self) -> None:
+        """Queues the first GPU copy so the next capture can read it without a stall."""
+        if (
+            self._present_fbo is None
+            or len(self._readback_buffers) != 2
+            or self._readback_ready
+        ):
+            return
+        self._present_fbo.read_into(
+            self._readback_buffers[self._readback_index], components=3
+        )
+        self._readback_index ^= 1
+        self._readback_ready = True
 
     def read_present(self) -> Optional[bytes]:
         """
-        The last composited frame at export resolution, bottom-up RGB.
+        The previous composited frame at export resolution, bottom-up RGB.
 
         This readback is the one real cost the port adds: the browser recorded
         the canvas straight off its own compositor stream with no copy at all,
         and there is no equivalent of that outside a browser. It only runs while
-        a clip is actually recording.
+        a clip is actually recording. Two pixel buffers pipeline the transfer so
+        the CPU reads a completed copy while the GPU fills the other one.
         """
-        if self._present_fbo is None:
+        if self._present_fbo is None or len(self._readback_buffers) != 2:
             return None
-        return self._present_fbo.read(components=3)
+        if not self._readback_ready:
+            self.prime_present_readback()
+            return None
+
+        write_index = self._readback_index
+        self._present_fbo.read_into(self._readback_buffers[write_index], components=3)
+        data = self._readback_buffers[write_index ^ 1].read()
+        self._readback_index ^= 1
+        return data
 
     def set_low_power(self, low: bool) -> None:
         """
