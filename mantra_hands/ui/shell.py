@@ -350,7 +350,6 @@ class Shell:
     def _draw_overlay_regions(self) -> int:
         """Shades only row bands that contain nontransparent overlay pixels."""
         sw, sh = self._screen_w, self._screen_h
-        previous_scissor = self.ctx.scissor
         calls = 0
         for top, bottom in self._draw_regions:
             # PIL rows run top-down; OpenGL's scissor origin is bottom-left. One
@@ -360,7 +359,7 @@ class Shell:
             self.ctx.scissor = (0, sh - screen_bottom, sw, screen_bottom - screen_top)
             self._vao.render(moderngl.TRIANGLE_STRIP, vertices=4)
             calls += 1
-        self.ctx.scissor = previous_scissor
+        self.ctx.scissor = None
         return calls
 
     @property

@@ -9,6 +9,16 @@ from PIL import Image
 from mantra_hands.ui.shell import Shell
 
 
+class FakeContext:
+    def __init__(self) -> None:
+        self.scissor = None
+
+
+class FakeVertexArray:
+    def render(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        pass
+
+
 class ShellDirtyRegionTests(unittest.TestCase):
     def test_hint_change_uses_partial_texture_update(self) -> None:
         shell = Shell.__new__(Shell)
@@ -82,6 +92,17 @@ class ShellDirtyRegionTests(unittest.TestCase):
         shell._empty = False
         shell._refresh_component_regions()
         self.assertNotIn(center, shell._draw_regions)
+
+    def test_overlay_draw_disables_scissor_after_regions(self) -> None:
+        shell = Shell.__new__(Shell)
+        shell.ctx = FakeContext()
+        shell._vao = FakeVertexArray()
+        shell._screen_w = shell._w = 1280
+        shell._screen_h = shell._h = 720
+        shell._draw_regions = [(10, 50), (600, 700)]
+
+        self.assertEqual(shell._draw_overlay_regions(), 2)
+        self.assertIsNone(shell.ctx.scissor)
 
 
 if __name__ == "__main__":

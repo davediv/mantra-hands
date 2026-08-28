@@ -617,6 +617,7 @@ class Renderer:
         self.sim_fbo[dst].use()
         ctx.viewport = (0, 0, self.tex_size, self.tex_size)
         ctx.disable(moderngl.BLEND)
+        ctx.scissor = self._solver_scissor()
 
         (
             self.p_sim.use()
@@ -635,9 +636,18 @@ class Renderer:
             .float("uBurstLife", FX.burst_life)
         )
         self.tri.draw(self.p_sim)
+        ctx.scissor = None
         self.draw_calls += 1
 
         self._ping_pong = dst
+
+    def _solver_scissor(self) -> Optional[Tuple[int, int, int, int]]:
+        if not self.low_power:
+            return None
+        # Low power draws the first half of the row-major particle UVs. Keeping
+        # the full viewport but scissoring its lower half preserves their exact
+        # texture coordinates while avoiding every unused solver fragment.
+        return 0, 0, self.tex_size, self.tex_size // 2
 
     def _draw_video(self) -> None:
         self.ctx.disable(moderngl.BLEND)

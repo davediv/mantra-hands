@@ -26,6 +26,14 @@ class ParticleSchedulingTests(unittest.TestCase):
         self.renderer._u_mode[0] = MODE_BURST
         self.assertTrue(self.renderer._particles_active())
 
+    def test_low_power_solver_only_updates_particles_that_are_drawn(self) -> None:
+        self.renderer.low_power = True
+        self.renderer.tex_size = 128
+        self.assertEqual(self.renderer._solver_scissor(), (0, 0, 128, 64))
+
+        self.renderer.low_power = False
+        self.assertIsNone(self.renderer._solver_scissor())
+
 
 if __name__ == "__main__":
     unittest.main()
