@@ -214,25 +214,25 @@ class Program:
     def floatv(self, name: str, v: np.ndarray) -> "Program":
         u = self.loc(name)
         if u is not None:
-            u.write(v.tobytes())
+            u.write(v)
         return self
 
     def intv(self, name: str, v: np.ndarray) -> "Program":
         u = self.loc(name)
         if u is not None:
-            u.write(v.tobytes())
+            u.write(v)
         return self
 
     def vec3v(self, name: str, v: np.ndarray) -> "Program":
         u = self.loc(name)
         if u is not None:
-            u.write(v.tobytes())
+            u.write(v)
         return self
 
     def mat3(self, name: str, v: np.ndarray) -> "Program":
         u = self.loc(name)
         if u is not None:
-            u.write(v.tobytes())
+            u.write(v)
         return self
 
     def tex(self, name: str, unit: int, texture: Optional[moderngl.Texture]) -> "Program":
