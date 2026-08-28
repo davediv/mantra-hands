@@ -16,6 +16,8 @@ the same reason the DOM was never in the browser's captureStream.
 
 from __future__ import annotations
 
+import queue
+import threading
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -23,6 +25,8 @@ import cv2
 import numpy as np
 
 from ..config import RECORD
+
+ENCODE_QUEUE_FRAMES = 2
 
 
 class Recorder:
@@ -43,6 +47,18 @@ class Recorder:
         self._countdown_at = 0.0
         self._last_write = 0.0
         self._frames = 0
+        self._dropped_frames = 0
+
+        # Conversion and codec writes can consume most of a 16.6 ms frame on a
+        # slower machine. A bounded producer/consumer queue keeps that work off
+        # the render thread without allowing recording memory to grow unchecked.
+        self._encode_queue: "queue.Queue[bytes]" = queue.Queue(
+            maxsize=ENCODE_QUEUE_FRAMES
+        )
+        self._encode_thread: Optional[threading.Thread] = None
+        self._encoding = False
+        self._encode_error: Optional[Exception] = None
+        self._encode_size = (0, 0)
 
     # ---------------------------------------------------------------- control ---
 
@@ -92,6 +108,9 @@ class Recorder:
 
         if self.state != "recording" or self._writer is None:
             return
+        if self._encode_error is not None:
+            self.stop()
+            return
 
         # The window runs at display rate; the file is 30 fps. Writing only when
         # a slot is due keeps the clip's duration honest instead of stretching it.
@@ -103,12 +122,7 @@ class Recorder:
 
         data = renderer.read_present()
         if data is not None:
-            frame = np.frombuffer(data, dtype=np.uint8).reshape(
-                renderer.buffer_h, renderer.buffer_w, 3
-            )
-            # GL hands back bottom-up RGB; the encoder wants top-down BGR.
-            self._writer.write(cv2.cvtColor(frame[::-1], cv2.COLOR_RGB2BGR))
-            self._frames += 1
+            self._submit_frame(data)
 
         if now_ms - self._started_at >= RECORD.max_seconds * 1000.0:
             self.stop()
@@ -135,17 +149,23 @@ class Recorder:
         self._started_at = now_ms
         self._last_write = 0.0
         self._frames = 0
+        self._dropped_frames = 0
+        self._start_encoder(width, height)
         self.state = "recording"
 
     def _finish(self) -> None:
-        if self._writer is not None:
-            self._writer.release()
-            self._writer = None
+        self._stop_encoder()
 
         path = self._path
         frames = self._frames
+        error = self._encode_error
         self._reset()
 
+        if error is not None:
+            if path is not None and frames == 0:
+                path.unlink(missing_ok=True)
+            self._message("Recording stopped because the video encoder failed.")
+            return
         if path is None or frames == 0:
             if path is not None:
                 path.unlink(missing_ok=True)
@@ -162,6 +182,69 @@ class Recorder:
         self._path = None
         if self.set_framing:
             self.set_framing(False)
+
+    def close(self) -> None:
+        """Finishes an active recording before the GL context is destroyed."""
+        if self.state == "recording":
+            self._finish()
+        elif self.state == "countdown":
+            self.cancel()
+
+    # --------------------------------------------------------------- encoding ---
+
+    def _start_encoder(self, width: int, height: int) -> None:
+        writer = self._writer
+        if writer is None:
+            return
+        self._encode_queue = queue.Queue(maxsize=ENCODE_QUEUE_FRAMES)
+        self._encode_size = (width, height)
+        self._encode_error = None
+        self._encoding = True
+        self._encode_thread = threading.Thread(
+            target=self._encode_loop,
+            args=(writer,),
+            name="record-encode",
+            daemon=True,
+        )
+        self._encode_thread.start()
+
+    def _submit_frame(self, data: bytes) -> bool:
+        """Queues one readback without ever waiting on the codec."""
+        try:
+            self._encode_queue.put_nowait(data)
+            return True
+        except queue.Full:
+            self._dropped_frames += 1
+            return False
+
+    def _encode_loop(self, writer) -> None:  # noqa: ANN001
+        width, height = self._encode_size
+        try:
+            while self._encoding or not self._encode_queue.empty():
+                try:
+                    data = self._encode_queue.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                frame = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
+                # GL hands back bottom-up RGB; the encoder wants top-down BGR.
+                writer.write(cv2.cvtColor(frame[::-1], cv2.COLOR_RGB2BGR))
+                self._frames += 1
+        except Exception as err:  # noqa: BLE001
+            self._encode_error = err
+            self._encoding = False
+        finally:
+            writer.release()
+
+    def _stop_encoder(self) -> None:
+        self._encoding = False
+        thread = self._encode_thread
+        self._encode_thread = None
+        if thread is not None and thread is not threading.current_thread():
+            # At most ENCODE_QUEUE_FRAMES are pending, so normal shutdown is a
+            # small bounded flush. Waiting here keeps the exported file valid.
+            thread.join()
+        # The worker owns and releases the writer once it starts.
+        self._writer = None
 
     def _next_path(self, ext: str) -> Path:
         n = 1

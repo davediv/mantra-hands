@@ -676,5 +676,6 @@ class App:
             self.scorer.end()
         if self.camera is not None:
             self.camera.release()
+        self.recorder.close()
         self.progress.save()
         self.window.destroy()
