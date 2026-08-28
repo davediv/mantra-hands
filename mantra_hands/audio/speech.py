@@ -127,12 +127,17 @@ def _model_dir() -> Optional[Path]:
 
 def speech_supported() -> bool:
     """A recognizer, a model and a microphone. Anything missing means the mock."""
+    # Most installations intentionally use the fully playable mock scorer. Check
+    # the cheap filesystem prerequisite before importing sounddevice, whose
+    # native initialization alone can delay the first screen by ~100 ms.
+    if _model_dir() is None:
+        return False
     try:
         import sounddevice  # noqa: F401
         import vosk  # noqa: F401
     except Exception:
         return False
-    return _model_dir() is not None
+    return True
 
 
 class SpeechScorer:
